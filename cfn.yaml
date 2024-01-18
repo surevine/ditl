@@ -1,0 +1,143 @@
+# This creates a VPC with a public subnet and associated routing. # Usage from command line:
+#   aws cloudformation --region <<YOUR-REGION>> create-stack --stack-name vpc --template-body file://vpc-setup.yaml
+
+Parameters:
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+        
+Resources:
+  ## VPC
+  PublicVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+
+  ## SUBNETS     
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PublicVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+  
+  
+  ## INTERNET GATEWAY
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  GatewayToInternet:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref PublicVPC
+      InternetGatewayId: !Ref InternetGateway
+  
+  ## PUBLIC ROUTING
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PublicVPC
+  
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId  
+      InstanceType: t3a.small
+      Tags:
+      - Key: Name
+        Value: webServer
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: 
+        - !GetAtt InstanceSecurityGroup.GroupId
+      SubnetId: !Ref PublicSubnet
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          yum -y install nginx
+          echo '<!DOCTYPE html>
+          <html><head><title>Welcome to nginx!</title></head>
+          <body>
+          <h1>Welcome to the website!</h1>
+          <p>If you see this page, the site is partially working</p>
+          <a href="./page2.html">Click here for more tests</a>
+          </body></html>
+          ' > /usr/share/nginx/html/index.html
+          echo '<!DOCTYPE html>
+          <html><head><title>PAge2</title></head>
+          <body>
+          <h1>Welcome to the website!</h1>
+          <p>If you see this page, the site is fully working.</p>
+          </body></html>
+          ' > /usr/share/nginx/html/page2.html
+          echo '[Unit]
+          Description=Stops nginx
+          [Service]
+          ExecStart=/root/kill.sh
+          [Install]
+          Also=killer.socket' > /usr/lib/systemd/system/killer.service 
+          echo '[Unit]
+          Description=killer Socket
+          [Socket]
+          ListenStream=/run/killer.sock
+          [Install]
+          WantedBy=sockets.target' > /usr/lib/systemd/system/killer.socket
+          echo 'location /page2.html {
+              gzip off;
+              root /usr/share/nginx/;
+              autoindex on;
+              fastcgi_pass unix:/run/killer.sock;
+              include /etc/nginx/fastcgi_params;
+          }' > /etc/nginx/default.d/killer.conf
+          echo '#!/bin/bash
+          systemctl stop nginx
+          rm /etc/nginx/default.d/killer.conf' > /root/kill.sh
+          chmod a+x /root/kill.sh
+          systemctl enable killer.socket
+          systemctl start killer.socket
+          systemctl enable nginx
+          systemctl start nginx
+        
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access
+      VpcId: !Ref PublicVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: '0.0.0.0/0'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: [ !Ref InstanceRole ]
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ ec2.amazonaws.com ]
+            Action:
+              - sts:AssumeRole
+      Path: /
