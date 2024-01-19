@@ -65,53 +65,149 @@ Resources:
       SecurityGroupIds: 
         - !GetAtt InstanceSecurityGroup.GroupId
       SubnetId: !Ref PublicSubnet
-      UserData: 
-        Fn::Base64: |
-          #!/bin/bash
-          yum -y install nginx
-          echo '<!DOCTYPE html>
-          <html><head><title>Welcome to nginx!</title></head>
-          <body>
-          <h1>Welcome to the website!</h1>
-          <p>If you see this page, the site is partially working</p>
-          <a href="./page2.html">Click here for more tests</a>
-          </body></html>
-          ' > /usr/share/nginx/html/index.html
-          echo '<!DOCTYPE html>
-          <html><head><title>PAge2</title></head>
-          <body>
-          <h1>Welcome to the website!</h1>
-          <p>If you see this page, the site is fully working.</p>
-          </body></html>
-          ' > /usr/share/nginx/html/page2.html
-          echo '[Unit]
-          Description=Stops nginx
-          [Service]
-          ExecStart=/root/kill.sh
-          [Install]
-          Also=killer.socket' > /usr/lib/systemd/system/killer.service 
-          echo '[Unit]
-          Description=killer Socket
-          [Socket]
-          ListenStream=/run/killer.sock
-          [Install]
-          WantedBy=sockets.target' > /usr/lib/systemd/system/killer.socket
-          echo 'location /page2.html {
-              gzip off;
-              root /usr/share/nginx/;
-              autoindex on;
-              fastcgi_pass unix:/run/killer.sock;
-              include /etc/nginx/fastcgi_params;
-          }' > /etc/nginx/default.d/killer.conf
-          echo '#!/bin/bash
-          systemctl stop nginx
-          rm /etc/nginx/default.d/killer.conf' > /root/kill.sh
-          chmod a+x /root/kill.sh
-          systemctl enable killer.socket
-          systemctl start killer.socket
-          systemctl enable nginx
-          systemctl start nginx
-        
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum install -y aws-cfn-bootstrap
+            - |
+              # Install the files and packages from the metadata
+            - '/opt/aws/bin/cfn-init -v '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource WebServerInstance '
+            - '         --configsets Install '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - |+
+    Metadata:
+      AWS::CloudFormation::Init:
+        install:
+          packages:
+            yum:
+              nginx: []
+          files:
+            /root/sshlog.sh
+              content: |
+                #!/bin/bash
+                journalctl -u sshd.service -fqn0 | grep --line-buffered "Connection closed" | while read line
+                do
+                  description=$(echo $line|  | jq -Rsa .)
+                  curl -X POST -H 'Content-type: application/json' {{resolve:ssm:jiraurl}} -d'{"summary":"SSH attempt","description":'"${description}"',"priority":2}'  
+                done
+              mode: "000755"
+            /root/ssher.sh
+              content: |
+                #!/bin/bash
+                MYIP=$(curl ifconfig.me)
+                ssh -oStrictHostKeyChecking=no blah@${MYIP}
+              mode: "000755"              
+            /usr/lib/systemd/system/sshlog.service:
+              content: |
+                [Unit]
+                Description=Alerts us to ssh login attempts
+                [Service]
+                Type=exec
+                ExecStart=/root/sshlog.sh
+              mode: "000755"      
+            /usr/lib/systemd/system/ssher.service:
+              content: |
+                [Unit]
+                Description=Makes ssh attempts
+                [Service]
+                Type=oneshot
+                ExecStart=/root/ssher.sh
+              mode: "000755"
+            /usr/lib/systemd/system/ssher.timer:
+              content: |
+                [Unit]
+                Description=Makes ssh attempts
+                [Timer]
+                OnCalendar=*-*-* *:00/10:00
+                RandomizedDelaySec=600
+                ExecStart=/root/ssher.sh
+              mode: "000755"              
+            /root/kill.sh:
+              content: |
+                #!/bin/bash
+                systemctl stop nginx
+                rm /etc/nginx/default.d/killer.conf' 
+              mode: "000755"
+            /root/webfail.sh:
+              content: |
+                #!/bin/bash
+                curl -X POST -H 'Content-type: application/json' {{resolve:ssm:jiraurl}} -d'{"summary":"WEBSITE DOWN!","description":"The website is down","priority":1}'  
+              mode: "000755"              
+            /usr/lib/systemd/system/killer.service:
+              content: |
+                [Unit]
+                Description=Stops nginx
+                [Service]
+                ExecStart=/root/kill.sh
+                [Install]
+                Also=killer.socket
+              mode: "000755"
+            /usr/lib/systemd/system/killer.socket: 
+                [Unit]
+                Description=killer Socket
+                [Socket]
+                ListenStream=/run/killer.sock
+                [Install]
+                WantedBy=sockets.target
+              mode: "000755"
+
+          commands:
+            updateNginxStart:
+              command: sed '/\[Service\]/a ExecStopPost=/root/webfail.sh' /usr/lib/systemd/system/nginx.service
+        start:              
+          files:
+            /etc/nginx/default.d/killer.conf:
+              content: |
+                location /page2.html {
+                    gzip off;
+                    root /usr/share/nginx/;
+                    autoindex on;
+                    fastcgi_pass unix:/run/killer.sock;
+                    include /etc/nginx/fastcgi_params;
+                }
+              owner: "nginx"
+              group: "nginx"
+            /usr/share/nginx/html/index.html:
+              content: |
+                echo '<!DOCTYPE html>
+                <html><head><title>Welcome to nginx!</title></head>
+                <body>
+                <h1>Welcome to the website!</h1>
+                <p>If you see this page, the site is partially working</p>
+                <a href="./page2.html">Click here for more tests</a>
+                </body></html>
+              mode: "000666"  
+            /usr/share/nginx/html/page2.html:
+              content: |  
+                <!DOCTYPE html>
+                <html><head><title>Page2</title></head>
+                <body>
+                <h1>Welcome to the website!</h1>
+                <p>If you see this page, the site is fully working.</p>
+                </body></html>
+              mode: "000666"
+          services:
+            systemd:
+              nginx:
+                enabled: "true"
+                ensureRunning: "true" 
+              killer.socket:
+                enabled: "true"
+                ensureRunning: "true" 
+              sshlog.service  
+                enabled: "true"
+                ensureRunning: "true"                   
+        configSets:
+          default:
+            - install
+            - start
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -122,6 +218,10 @@ Resources:
         FromPort: 80
         ToPort: 80
         CidrIp: '0.0.0.0/0'
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: '0.0.0.0/0'       
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
