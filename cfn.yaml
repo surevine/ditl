@@ -77,8 +77,7 @@ Resources:
             - '/opt/aws/bin/cfn-init -v '
             - '         --stack '
             - !Ref 'AWS::StackName'
-            - '         --resource WebServerInstance '
-            - '         --configsets Install '
+            - '         --resource EC2Instance '
             - '         --region '
             - !Ref 'AWS::Region'
             - |+
@@ -89,20 +88,20 @@ Resources:
             yum:
               nginx: []
           files:
-            /root/sshlog.sh
+            /root/sshlog.sh:
               content: |
                 #!/bin/bash
                 journalctl -u sshd.service -fqn0 | grep --line-buffered "Connection closed" | while read line
                 do
-                  description=$(echo $line|  | jq -Rsa .)
+                  description=$(echo $line | jq -Rsa .)
                   curl -X POST -H 'Content-type: application/json' {{resolve:ssm:jiraurl}} -d'{"summary":"SSH attempt","description":'"${description}"',"priority":2}'  
                 done
               mode: "000755"
-            /root/ssher.sh
+            /root/ssher.sh:
               content: |
                 #!/bin/bash
                 MYIP=$(curl ifconfig.me)
-                ssh -oStrictHostKeyChecking=no blah@${MYIP}
+                ssh -oStrictHostKeyChecking=no blah@${MYIP} || true
               mode: "000755"              
             /usr/lib/systemd/system/sshlog.service:
               content: |
@@ -111,7 +110,9 @@ Resources:
                 [Service]
                 Type=exec
                 ExecStart=/root/sshlog.sh
-              mode: "000755"      
+                [Install]
+                WantedBy=multi-user.target
+              mode: "000644"      
             /usr/lib/systemd/system/ssher.service:
               content: |
                 [Unit]
@@ -119,7 +120,7 @@ Resources:
                 [Service]
                 Type=oneshot
                 ExecStart=/root/ssher.sh
-              mode: "000755"
+              mode: "000644"
             /usr/lib/systemd/system/ssher.timer:
               content: |
                 [Unit]
@@ -127,8 +128,9 @@ Resources:
                 [Timer]
                 OnCalendar=*-*-* *:00/10:00
                 RandomizedDelaySec=600
-                ExecStart=/root/ssher.sh
-              mode: "000755"              
+                [Install]
+                WantedBy=timers.target
+              mode: "000644"              
             /root/kill.sh:
               content: |
                 #!/bin/bash
@@ -148,19 +150,20 @@ Resources:
                 ExecStart=/root/kill.sh
                 [Install]
                 Also=killer.socket
-              mode: "000755"
+              mode: "000644"
             /usr/lib/systemd/system/killer.socket: 
+              content: |
                 [Unit]
                 Description=killer Socket
                 [Socket]
                 ListenStream=/run/killer.sock
                 [Install]
                 WantedBy=sockets.target
-              mode: "000755"
+              mode: "000644"
 
           commands:
             updateNginxStart:
-              command: sed '/\[Service\]/a ExecStopPost=/root/webfail.sh' /usr/lib/systemd/system/nginx.service
+              command: sed -i '/\[Service\]/a ExecStopPost=/root/webfail.sh' /usr/lib/systemd/system/nginx.service
         start:              
           files:
             /etc/nginx/default.d/killer.conf:
@@ -201,9 +204,12 @@ Resources:
               killer.socket:
                 enabled: "true"
                 ensureRunning: "true" 
-              sshlog.service  
+              sshlog.service:  
                 enabled: "true"
-                ensureRunning: "true"                   
+                ensureRunning: "true"   
+              ssher.timer:
+                enabled: "true"
+                ensureRunning: "true"                                   
         configSets:
           default:
             - install
